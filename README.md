@@ -49,6 +49,14 @@ Left-click the icon to show the current balance. The menu has Check now, Re-cent
 
 Icon colours: green means on target, grey means headset off or dongle missing, red means a mismatch that couldn't be fixed or auto-fix is off.
 
+## Download
+
+Get `BalanceWatchdog.exe` from [Releases](https://github.com/bp2008/Razer_Blackshark_V3_Pro_GameChatBalance_Watchdog/releases). It needs the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) (x64).
+
+1. Put the exe in a permanent folder, for example `%LOCALAPPDATA%\BalanceWatchdog\app`.
+2. Run it.
+3. Optionally, tick **Start with Windows** in the tray menu.
+
 ## Usage
 
 ```
