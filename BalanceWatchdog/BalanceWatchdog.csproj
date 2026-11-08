@@ -12,9 +12,9 @@
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
     <TieredPGO>false</TieredPGO>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Product>BlackShark V3 Pro Game/Chat Balance Watchdog</Product>
-    <Description>Keeps the Razer BlackShark V3 Pro game/chat balance on target and shows it on screen when it changes.</Description>
+    <Description>Keeps the Razer BlackShark V3 Pro game/chat balance and sidetone on target and shows them on screen when they change.</Description>
   </PropertyGroup>
 
 </Project>

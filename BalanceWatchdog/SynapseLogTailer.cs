@@ -3,17 +3,25 @@ using System.Text.RegularExpressions;
 
 namespace BalanceWatchdog;
 
-public enum SynapseEventKind { UserSetBalance, ProfileReplay, ReadFromHeadset, WroteToHeadset, LinkStatus }
+public enum SynapseEventKind { UserSet, ProfileReplay, ReadFromHeadset, WroteToHeadset, LinkStatus }
 
-public sealed record SynapseEvent(SynapseEventKind Kind, string Timestamp, int Value, string Text)
+/// <summary>
+/// Setting is "balance" (Value = Synapse balanceMode, 20 - raw) or "sidetone" (Value = level), or "" for link status.
+/// </summary>
+public sealed record SynapseEvent(SynapseEventKind Kind, string Setting, string Timestamp, int Value, string Text)
 {
-    /// <summary>True when the value is outside the valid 0..20 range (the bug signature).</summary>
-    public bool Invalid => Kind != SynapseEventKind.LinkStatus && (Value < 0 || Value > 20);
+    /// <summary>True when the value is out of range (the bug signature: Synapse stored the headset's 255 "not ready").</summary>
+    public bool Invalid => Setting switch
+    {
+        "balance" => Value < 0 || Value > 20,
+        "sidetone" => Value < 0 || Value > WatchdogApp.SidetoneHardMax,
+        _ => false,
+    };
 }
 
 /// <summary>
-/// Cheaply follows Razer Synapse's device-module logs and extracts only game/chat balance traffic.
-/// Synapse logs every balance read/write, which is exactly the forensic trail we want.
+/// Cheaply follows Razer Synapse's device-module logs and extracts only balance/sidetone traffic.
+/// Synapse logs every read/write, which is exactly the forensic trail we want.
 /// </summary>
 public sealed partial class SynapseLogTailer
 {
@@ -86,24 +94,31 @@ public sealed partial class SynapseLogTailer
 
     void ParseLine(string line)
     {
-        if (line.Length < 30 || !line.Contains("alance") && !line.Contains("ConnectionStatus r->")) return;
+        if (line.Length < 30 || !line.Contains("alance") && !line.Contains("idetone") && !line.Contains("SIDE_TONE") && !line.Contains("ConnectionStatus r->")) return;
         string ts = line.Length > 25 && line[0] == '[' ? line.Substring(1, 23) : "";
         SynapseEvent? ev = null;
         Match m;
+        int V(int g = 1) => int.Parse(m.Groups[g].Value);
         if ((m = UiSet().Match(line)).Success)
-            ev = new(SynapseEventKind.UserSetBalance, ts, int.Parse(m.Groups[1].Value), "user moved the balance slider in Synapse");
+            ev = new(SynapseEventKind.UserSet, "balance", ts, V(), "user moved the balance slider in Synapse");
         else if ((m = Replay().Match(line)).Success)
-            ev = new(SynapseEventKind.ProfileReplay, ts, int.Parse(m.Groups[1].Value), $"re-applied stored profile value (version {m.Groups[2].Value})");
+            ev = new(SynapseEventKind.ProfileReplay, "balance", ts, V(), $"re-applied stored balance (version {m.Groups[2].Value})");
         else if ((m = GetResult().Match(line)).Success)
-            ev = new(SynapseEventKind.ReadFromHeadset, ts, 20 - int.Parse(m.Groups[1].Value), $"read raw {m.Groups[1].Value} from headset");
+            ev = new(SynapseEventKind.ReadFromHeadset, "balance", ts, 20 - V(), $"read balance raw {V()} from headset");
         else if ((m = SetResult().Match(line)).Success)
-            ev = new(SynapseEventKind.WroteToHeadset, ts, 20 - int.Parse(m.Groups[1].Value), $"wrote raw {m.Groups[1].Value} to headset");
+            ev = new(SynapseEventKind.WroteToHeadset, "balance", ts, 20 - V(), $"wrote balance raw {V()} to headset");
+        else if ((m = UiSidetone().Match(line)).Success)
+            ev = new(SynapseEventKind.UserSet, "sidetone", ts, V(2), $"user set sidetone {V(2)} in Synapse ({(m.Groups[1].Value == "true" ? "on" : "off")})");
+        else if ((m = GetSidetone().Match(line)).Success)
+            ev = new(SynapseEventKind.ReadFromHeadset, "sidetone", ts, V(), $"read sidetone {V()} from headset");
+        else if ((m = SetSidetone().Match(line)).Success)
+            ev = new(SynapseEventKind.WroteToHeadset, "sidetone", ts, V(), $"wrote sidetone {V()} to headset");
         else if ((m = Link().Match(line)).Success)
-            ev = new(SynapseEventKind.LinkStatus, ts, int.Parse(m.Groups[1].Value), $"dongle reports headset {m.Groups[2].Value}");
+            ev = new(SynapseEventKind.LinkStatus, "", ts, V(), $"dongle reports headset {m.Groups[2].Value}");
         if (ev == null) return;
 
         // Synapse logs most events twice; and link status is polled constantly. Only report changes / new events.
-        string key = ev.Kind == SynapseEventKind.LinkStatus ? $"L{ev.Value}" : $"{ev.Kind}{ev.Value}{ev.Timestamp[..Math.Min(19, ev.Timestamp.Length)]}";
+        string key = ev.Kind == SynapseEventKind.LinkStatus ? $"L{ev.Value}" : $"{ev.Kind}{ev.Setting}{ev.Value}{ev.Timestamp[..Math.Min(19, ev.Timestamp.Length)]}";
         if (ev.Kind == SynapseEventKind.LinkStatus && _lastLink == key) return;
         if (ev.Kind == SynapseEventKind.LinkStatus) _lastLink = key;
         else if (key == _lastKey) return;
@@ -121,6 +136,12 @@ public sealed partial class SynapseLogTailer
     // Dongle (Valkyrie) logs the raw byte it sent as jsonData.index
     [GeneratedRegex(@"setGameChatBalanceValue r-> .*?""jsonData"":\{""index"":(-?\d+)")]
     private static partial Regex SetResult();
-    [GeneratedRegex(@"getWirelessConnectionStatus r-> .*?""jsonData"":\{""status"":(\d+),""statusEnum"":""(\w+)""")]
+    [GeneratedRegex(@"FROM UI \{""type"":""ON_SET_MIC_SIDE_TONE"".*?""micSideTone"":\{""isEnabled"":(true|false),""value"":(-?\d+)")]
+    private static partial Regex UiSidetone();
+    [GeneratedRegex(@"getSidetoneVolume r-> .*?""data"":\[(\d+)\]")]
+    private static partial Regex GetSidetone();
+    [GeneratedRegex(@"setSidetoneVolume r-> .*?""jsonData"":\{""level"":(-?\d+)")]
+    private static partial Regex SetSidetone();
+    [GeneratedRegex(@"getWirelessConnectionStatus r->.*?""jsonData"":\{""status"":(\d+),""statusEnum"":""(\w+)""")]
     private static partial Regex Link();
 }

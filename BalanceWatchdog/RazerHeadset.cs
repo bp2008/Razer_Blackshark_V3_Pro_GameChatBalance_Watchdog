@@ -45,13 +45,27 @@ public sealed class RazerHeadset
     /// <summary>Test aid: writes 255 exactly like Synapse's power-on bug does.</summary>
     public async Task<bool> SimulateSynapseBugAsync() => await QueryAsync(CmdSetBalance, [255], toHeadset: true) != null;
 
+    /// <summary>Read-only query of a "Get" command (cmd, 0, 0). Returns the reply's data bytes.</summary>
+    public Task<byte[]?> GetAsync(byte cmd, bool toHeadset = true)
+    {
+        if (cmd >= 0x80) throw new ArgumentException("Only Get commands (< 0x80) are allowed here.", nameof(cmd));
+        return QueryAsync([cmd, 0, 0], null, toHeadset);
+    }
+
+    /// <summary>Writes one byte with a "Set" command (cmd, 0, 1).</summary>
+    public async Task<bool> SetByteAsync(byte setCmd, byte value) => await QueryAsync([setCmd, 0, 1], [value], toHeadset: true) != null;
+
+    /// <summary>Read-only probe using Razer's class/ID command layout ([7]=class, [8]=id). Experimental.</summary>
+    public Task<byte[]?> ProbeClassIdAsync(byte cls, byte id, byte size, bool toHeadset) =>
+        QueryAsync([cls, id, size], null, toHeadset, classId: true);
+
     async Task<byte?> QueryByteAsync(byte[] cmd, byte[]? data, bool toHeadset)
     {
         var r = await QueryAsync(cmd, data, toHeadset);
         return r is { Length: > 0 } ? r[0] : null;
     }
 
-    async Task<byte[]?> QueryAsync(byte[] cmd, byte[]? data, bool toHeadset)
+    async Task<byte[]?> QueryAsync(byte[] cmd, byte[]? data, bool toHeadset, bool classId = false)
     {
         await _lock.WaitAsync();
         try
@@ -62,7 +76,8 @@ public sealed class RazerHeadset
                 if (_path == null) return null;
                 try
                 {
-                    var r = await TransactAsync(_path, cmd, data, toHeadset);
+                    var r = classId ? await TransactClassIdAsync(_path, cmd[0], cmd[1], cmd[2], toHeadset)
+                                    : await TransactAsync(_path, cmd, data, toHeadset);
                     if (r != null) return r;
                 }
                 catch (IOException) { _path = null; } // device re-enumerated; look it up again
@@ -116,6 +131,29 @@ public sealed class RazerHeadset
             await Task.Delay(60);
         }
         return null;
+    }
+
+    static async Task<byte[]?> TransactClassIdAsync(string path, byte cls, byte id, byte size, bool toHeadset)
+    {
+        using var fs = OpenAsync(path);
+        var r = new byte[64];
+        r[0] = 2; r[2] = 0x60; r[6] = (byte)(size + 1); r[7] = cls; r[8] = id; r[9] = toHeadset ? (byte)0x80 : (byte)0;
+        byte x = 0;
+        for (int i = 0; i < 62; i++) x ^= r[i];
+        r[62] = x;
+        await fs.WriteAsync(r);
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(800));
+        var buf = new byte[64];
+        try
+        {
+            while (true)
+            {
+                int n = await fs.ReadAsync(buf, cts.Token);
+                if (n < 12 || buf[0] != 2 || buf[2] != 0x60 || buf[7] != cls || buf[8] != id) continue;
+                return buf[1] == 2 ? buf.AsSpan(10, Math.Max(1, (int)size)).ToArray() : [];   // empty = device rejected it
+            }
+        }
+        catch (OperationCanceledException) { return null; }
     }
 
     static byte[] BuildReport(byte[] cmd, byte[]? data, bool toHeadset)

@@ -13,7 +13,7 @@ static class Program
     static int Main(string[] args)
     {
         string cmd = args.Length > 0 ? args[0].TrimStart('-', '/').ToLowerInvariant() : "";
-        if (cmd is "status" or "set" or "scan" or "listen" or "simulate-bug" or "help" or "?")
+        if (cmd is "status" or "set" or "set-sidetone" or "scan" or "listen" or "simulate-bug" or "probe" or "help" or "?")
         {
             if (!Console.IsOutputRedirected) AttachConsole(-1);
             return RunCli(cmd, args).GetAwaiter().GetResult();
@@ -75,7 +75,7 @@ static class Program
             var tailer = new SynapseLogTailer(fromStart: true);
             tailer.EventSeen += e =>
             {
-                string val = e.Kind == SynapseEventKind.LinkStatus ? "" : $" => balanceMode {e.Value}";
+                string val = e.Setting == "balance" ? $" => balanceMode {e.Value}" : "";
                 Console.WriteLine($"{e.Timestamp}  {e.Text}{val}{(e.Invalid ? "   <-- INVALID" : "")}");
             };
             tailer.ScanAll();
@@ -99,15 +99,54 @@ static class Program
             Console.WriteLine($"Link status : {Describe(link, v => v == 1 ? "connected" : "not connected")}");
             var bal = await hs.GetBalanceRawAsync();
             Console.WriteLine($"Balance raw : {Describe(bal, v => v == RazerHeadset.RawCenter ? "centre" : v > RazerHeadset.RawMax ? "INVALID" : "off-centre")}");
-            var roller = await hs.GetRollerFunctionAsync();
-            Console.WriteLine($"Roller func : {Describe(roller, _ => "")}");
+            var stOn = await hs.GetAsync(24);
+            var st = await hs.GetAsync(25);
+            Console.WriteLine($"Sidetone    : {Describe(st?.FirstOrDefault(), v => v > 100 ? "INVALID" : "")}{(stOn is [0, ..] ? " (off)" : "")}");
+            var batt = await hs.GetAsync(33);
+            var chg = await hs.GetAsync(42);
+            Console.WriteLine($"Battery     : {(batt is [var bp, ..] && bp <= 100 ? $"{bp}%" : "(unknown)")}{(chg is [1, ..] ? " charging" : "")}");
+            return 0;
+        }
+        if (cmd == "probe")
+        {
+            // Read-only: "Get" commands Synapse uses for this headset, plus an experimental signal-quality query.
+            (byte c, string name, bool headset)[] gets =
+            [
+                (24, "Sidetone status", true), (25, "Sidetone level", true), (33, "Battery", true), (42, "Charging", true),
+                (85, "Mic status", true), (92, "Game/chat balance", true), (106, "Roller function", true), (95, "HyperSpeed mode", true),
+                (32, "Wireless link (dongle)", false),
+            ];
+            foreach (var (c, name, headset) in gets)
+            {
+                var d = await hs.GetAsync(c, headset);
+                Console.WriteLine($"{name,-24} [{c,3}]: {(d == null ? "(no reply)" : BitConverter.ToString(d))}");
+            }
+            foreach (bool headset in new[] { false, true })
+            {
+                var q = await hs.ProbeClassIdAsync(7, 0x96, 1, headset);
+                Console.WriteLine($"Conn. quality 7/0x96 {(headset ? "headset" : "dongle ")}: {(q == null ? "(no reply)" : q.Length == 0 ? "(rejected)" : BitConverter.ToString(q))}");
+            }
             return 0;
         }
         if (cmd == "simulate-bug")
         {
+            if (args.Length > 1 && args[1].Equals("sidetone", StringComparison.OrdinalIgnoreCase))
+            {
+                bool ok2 = await hs.SetByteAsync(153, 255);
+                var back = await hs.GetAsync(25);
+                Console.WriteLine($"Wrote sidetone 255 (Synapse bug value): {(ok2 ? "acknowledged" : "FAILED")}; read back: {(back is [var b2, ..] ? b2.ToString() : "(no response)")}");
+                return 0;
+            }
             bool ok = await hs.SimulateSynapseBugAsync();
-            Console.WriteLine($"Wrote raw 255 (Synapse bug value): {(ok ? "acknowledged" : "FAILED")}; read back: {Describe(await hs.GetBalanceRawAsync(), _ => "")}");
+            Console.WriteLine($"Wrote balance raw 255 (Synapse bug value): {(ok ? "acknowledged" : "FAILED")}; read back: {Describe(await hs.GetBalanceRawAsync(), _ => "")}");
             return 0;
+        }
+        if (cmd == "set-sidetone" && args.Length > 1 && byte.TryParse(args[1], out byte lvl) && lvl <= 15)
+        {
+            bool ok = await hs.SetByteAsync(153, lvl);
+            var back = await hs.GetAsync(25);
+            Console.WriteLine($"Set sidetone {lvl}: {(ok ? "acknowledged" : "FAILED")}; read back: {(back is [var b3, ..] ? b3.ToString() : "(no response)")}");
+            return ok && back is [var b4, ..] && b4 == lvl ? 0 : 2;
         }
         if (cmd == "set" && args.Length > 1 && byte.TryParse(args[1], out byte raw) && raw <= RazerHeadset.RawMax)
         {
@@ -121,8 +160,11 @@ static class Program
             BalanceWatchdog --interval 60   tray mode, safety-net poll every N seconds (default 60)
             BalanceWatchdog status          print link state and the raw balance byte (0..20, 10 = centre)
             BalanceWatchdog set 10          write a raw balance value (0..20; 0 = all game, 20 = all chat)
+            BalanceWatchdog set-sidetone 4  write a sidetone level (0..15)
             BalanceWatchdog scan            print the balance history found in Synapse's existing logs
             BalanceWatchdog listen 30       dump the headset's HID traffic for N seconds
+            BalanceWatchdog probe           read-only dump of the headset settings this tool knows about
+            BalanceWatchdog simulate-bug [sidetone]   write 255 like Synapse's bug does (testing)
             """);
         return 0;
     }
