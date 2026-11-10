@@ -63,6 +63,7 @@ Observed with headset firmware 1.4.4.0 and Synapse 4.0.827 on Windows 11, using 
 
   Clicks pass through it and it never takes focus.
 - **Recovers from crashes.** Unhandled exceptions are logged and the app relaunches itself (at most 5 times in a row).
+- **Records how it ended.** It logs when Windows or an installer (Restart Manager) asks it to close, and why. A heartbeat file written every 5 minutes lets the next start log `PREVIOUS RUN ENDED UNEXPECTEDLY` with the last time it was seen alive, if it was killed. If Restart Manager closes it during an update, Windows is asked to start it again afterwards.
 
 It uses about 16 MB of RAM and essentially no CPU at idle.
 
@@ -90,12 +91,25 @@ Get `BalanceWatchdog.exe` from [Releases](https://github.com/bp2008/Razer_Blacks
 1. Put the exe in a permanent folder, for example `%LOCALAPPDATA%\BalanceWatchdog\app`.
 2. Run it.
 3. Optionally, tick **Start with Windows** in the tray menu.
+4. Optionally, to bring it back if something kills it, add a scheduled task that runs `--ensure` every 10 minutes. `--ensure` does nothing if the app is already running, or if you last closed it with **Exit**:
+
+   ```powershell
+   $exe = "$env:LOCALAPPDATA\BalanceWatchdog\app\BalanceWatchdog.exe"
+   Register-ScheduledTask -TaskName "BlackShark Balance Watchdog (ensure running)" `
+     -Action (New-ScheduledTaskAction -Execute $exe -Argument "--ensure") `
+     -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 10)) `
+     -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0 -MultipleInstances IgnoreNew -StartWhenAvailable -Priority 5) `
+     -Principal (New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive)
+   ```
+
+   `-ExecutionTimeLimit 0` matters: the relaunched app runs as that task, and Task Scheduler would otherwise stop it after 72 hours. Remove the task with `Unregister-ScheduledTask "BlackShark Balance Watchdog (ensure running)"`.
 
 ## Usage
 
 ```
 BalanceWatchdog                 run in the tray: live watch, overlay, log, notify, auto-revert
 BalanceWatchdog --interval 60   tray mode with a safety-net poll every N seconds (default 60)
+BalanceWatchdog --ensure        start in the tray only if not running and not closed with Exit (silent)
 BalanceWatchdog status          print link, balance, sidetone and battery
 BalanceWatchdog set 10          write a raw balance value (0..20)
 BalanceWatchdog set-sidetone 4  write a sidetone level (0..15)

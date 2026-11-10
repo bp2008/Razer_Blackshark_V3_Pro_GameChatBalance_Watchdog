@@ -112,12 +112,68 @@ sealed class WatchdogApp : ApplicationContext
         _listener.Report += r => _overlay.BeginInvoke(() => OnHidReport(r));
         _listener.Problem += p => _overlay.BeginInvoke(() => HidError($"listener: {p}"));
 
+        // ---- lifetime diagnostics: how did the previous run end, and how does this one end? ----
+        ReportPreviousRun();
+        Heartbeat("alive");
+        _heartbeatTimer.Interval = 5 * 60 * 1000;
+        _heartbeatTimer.Tick += (_, _) => Heartbeat("alive");
+        _heartbeatTimer.Start();
+        _overlay.SessionMessage += (msg, w, l) =>
+        {
+            long lp = l.ToInt64();
+            string why = (lp & 0x1) != 0 ? "an application/installer (Restart Manager, ENDSESSION_CLOSEAPP)"
+                       : (lp & 0x80000000L) != 0 ? "user logoff"
+                       : (lp & 0x40000000L) != 0 ? "a critical shutdown" : "Windows shutdown/restart";
+            if (msg == 0x11) Log($"Windows asked to close this app (WM_QUERYENDSESSION) on behalf of {why}");
+            else if (w != IntPtr.Zero) { Log($"Closing: session ending (WM_ENDSESSION) on behalf of {why}"); Heartbeat($"exited: session end ({why})"); }
+        };
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => { if (!_exitLogged) { _exitLogged = true; Log("Process exiting"); Heartbeat("exited: process exit"); } };
+        // If Restart Manager closes us (e.g. during an update), ask Windows to start us again afterwards.
+        // Crash/hang restarts are excluded: Program handles crashes itself.
+        try { RegisterApplicationRestart("--ensure", 1 /*RESTART_NO_CRASH*/ | 2 /*RESTART_NO_HANG*/); } catch { }
+
         Log($"Started v{Application.ProductVersion.Split('+')[0]} (live HID listener + poll every {pollSeconds}s; targets: balance {DescribeBalance(_balance.Target)}, sidetone {(_sidetone.HasTarget ? _sidetone.Target.ToString() : "from first reading")}; auto-fix on)");
         _audio.Refresh();
         _listener.Start();
         _tailTimer.Start();
         _pollTimer.Start();
         RequestCheck("startup");
+    }
+
+    // ---------------------------------------------------------------- lifetime diagnostics
+    readonly System.Windows.Forms.Timer _heartbeatTimer = new();
+    bool _exitLogged;
+    internal static string HeartbeatFile => Path.Combine(DataDir, "heartbeat.txt");
+
+    /// <summary>True if the last run ended because the user chose Exit (so --ensure should leave it closed).</summary>
+    internal static bool LastExitWasUser()
+    {
+        try { return File.Exists(HeartbeatFile) && File.ReadAllText(HeartbeatFile).StartsWith("exited: user chose Exit"); }
+        catch { return false; }
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern int RegisterApplicationRestart(string commandLine, int flags);
+
+    internal static void Heartbeat(string state)
+    {
+        try { File.WriteAllText(HeartbeatFile, $"{state}|{DateTime.Now:yyyy-MM-dd HH:mm:ss}|pid {Environment.ProcessId}"); } catch { }
+    }
+
+    static void ReportPreviousRun()
+    {
+        try
+        {
+            if (!File.Exists(HeartbeatFile)) return;
+            var parts = File.ReadAllText(HeartbeatFile).Split('|');
+            if (parts.Length < 2) return;
+            if (parts[0] == "alive")
+                Log($"PREVIOUS RUN ENDED UNEXPECTEDLY ({(parts.Length > 2 ? parts[2] : "")}): no exit was recorded. It was last seen alive at {parts[1]} " +
+                    "(heartbeat every 5 min), so it was killed or died without a trace between then and the next 5-minute mark.");
+            else
+                Log($"Previous run ended normally: {parts[0]} at {parts[1]}");
+        }
+        catch { }
     }
 
     // ---------------------------------------------------------------- live HID traffic
@@ -469,7 +525,10 @@ sealed class WatchdogApp : ApplicationContext
     protected override void ExitThreadCore()
     {
         Log("Exiting (user)");
+        _exitLogged = true;
+        Heartbeat("exited: user chose Exit");
         Program.UserExit = true;
+        _heartbeatTimer.Stop();
         SystemEvents.PowerModeChanged -= OnPower;
         _pollTimer.Stop(); _tailTimer.Stop(); _soonTimer.Stop(); _readTimer.Stop();
         _listener.Dispose();

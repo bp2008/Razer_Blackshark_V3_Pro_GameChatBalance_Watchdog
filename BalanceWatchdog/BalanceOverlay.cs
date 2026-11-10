@@ -41,6 +41,18 @@ sealed class BalanceOverlay : Form
 
     protected override bool ShowWithoutActivation => true;
 
+    /// <summary>
+    /// Raised for WM_QUERYENDSESSION (0x11) / WM_ENDSESSION (0x16). This hidden top-level window receives
+    /// them when Windows logs off / shuts down, or when Restart Manager (installers, updaters) closes the app.
+    /// </summary>
+    public event Action<int, IntPtr, IntPtr>? SessionMessage;
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg is 0x11 or 0x16) SessionMessage?.Invoke(m.Msg, m.WParam, m.LParam);
+        base.WndProc(ref m);
+    }
+
     protected override CreateParams CreateParams
     {
         get

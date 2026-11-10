@@ -20,6 +20,8 @@ static class Program
         }
 
         int interval = 60, restarts = 0;
+        // --ensure: start only if not already running, silently (for Task Scheduler / Windows restart).
+        bool ensure = args.Any(a => a.TrimStart('-', '/').Equals("ensure", StringComparison.OrdinalIgnoreCase));
         for (int i = 0; i < args.Length - 1; i++)
         {
             string a = args[i].TrimStart('-', '/').ToLowerInvariant();
@@ -34,9 +36,12 @@ static class Program
         catch (AbandonedMutexException) { owned = true; }
         if (!owned)
         {
-            if (restarts == 0) MessageBox.Show("Balance Watchdog is already running (see the tray).", "Balance Watchdog");
+            if (restarts == 0 && !ensure) MessageBox.Show("Balance Watchdog is already running (see the tray).", "Balance Watchdog");
             return 1;
         }
+        // --ensure respects the user's choice: after tray > Exit it stays closed until started normally (e.g. next logon).
+        if (ensure && WatchdogApp.LastExitWasUser()) return 0;
+        if (ensure) WatchdogApp.Log("Started by --ensure (Task Scheduler or Windows restart) because it was not running");
 
         // Crash recovery: log the exception and relaunch (up to 5 times per process chain).
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
@@ -55,6 +60,7 @@ static class Program
     {
         if (Interlocked.Exchange(ref _crashing, 1) == 1) return;
         WatchdogApp.Log($"CRASH: {ex}");
+        WatchdogApp.Heartbeat($"exited: crash ({ex?.GetType().Name})");
         if (!UserExit && restarts < 5)
         {
             try { single.ReleaseMutex(); } catch { }
@@ -158,6 +164,7 @@ static class Program
         Console.WriteLine("""
             BalanceWatchdog                 run in the tray: live watch, overlay, log, notify, auto-revert
             BalanceWatchdog --interval 60   tray mode, safety-net poll every N seconds (default 60)
+            BalanceWatchdog --ensure        start in the tray only if not already running (silent)
             BalanceWatchdog status          print link state and the raw balance byte (0..20, 10 = centre)
             BalanceWatchdog set 10          write a raw balance value (0..20; 0 = all game, 20 = all chat)
             BalanceWatchdog set-sidetone 4  write a sidetone level (0..15)
